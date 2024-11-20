@@ -1,0 +1,11 @@
+[package]
+name = "ln-routing-replay"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bitcoin = "0.32"
+# Note that we have to turn on no-std to disable the timestamp range verification on channel_update
+lightning = { version = "0.0.125", default-features = false, features = ["no-std"] }
