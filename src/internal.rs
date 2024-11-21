@@ -3,8 +3,9 @@ use crate::{do_setup, process_probe_result, results_complete, DirectedChannel, P
 use bitcoin::constants::ChainHash;
 use bitcoin::network::Network;
 use bitcoin::hex::FromHex;
-use bitcoin::TxOut;
+use bitcoin::{Amount, TxOut};
 
+use lightning::ln::chan_utils::make_funding_redeemscript;
 use lightning::ln::msgs::{ChannelAnnouncement, ChannelUpdate};
 use lightning::routing::gossip::{NetworkGraph, NodeId, ReadOnlyNetworkGraph};
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
@@ -15,6 +16,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::str::FromStr;
+use std::sync::Mutex;
 
 struct DevNullLogger;
 impl Logger for DevNullLogger {
@@ -129,22 +131,25 @@ fn parse_update(line: String) -> Option<(u64, ChannelUpdate)> {
 	Some((timestamp.parse().ok()?, update.ok()?))
 }
 
-fn parse_announcement(line: String) -> Option<(u64, ChannelAnnouncement)> {
-	let (timestamp, ann_hex) = line.split_once('|').expect("Invalid ChannelAnnouncement line");
+fn parse_announcement(line: String) -> Option<(u64, u64, ChannelAnnouncement)> {
+	let mut fields = line.split('|');
+	let timestamp = fields.next().expect("Invalid ChannelAnnouncement line");
+	let funding_sats = fields.next().expect("Invalid ChannelAnnouncement line");
+	let ann_hex = fields.next().expect("Invalid ChannelAnnouncement line");
 	let ann_bytes = Vec::<u8>::from_hex(ann_hex).ok().expect("Invalid ChannelAnnouncement hex");
 	let announcement = Readable::read(&mut &ann_bytes[..]);
 	debug_assert!(announcement.is_ok());
-	Some((timestamp.parse().ok()?, announcement.ok()?))
+	Some((timestamp.parse().ok()?, funding_sats.parse().ok()?, announcement.ok()?))
 }
 
 struct FundingValueProvider {
-	channel_values: HashMap<u64, TxOut>,
+	channel_values: Mutex<HashMap<u64, TxOut>>,
 }
 
 impl UtxoLookup for FundingValueProvider {
 	fn get_utxo(&self, _: &ChainHash, scid: u64) -> UtxoResult {
 		UtxoResult::Sync(Ok(
-			self.channel_values.get(&scid).expect("Missing Channel Value").clone()
+			self.channel_values.lock().unwrap().get(&scid).expect("Missing Channel Value").clone()
 		))
 	}
 }
@@ -155,10 +160,9 @@ pub fn main() {
 	let mut announcements = open_file("channel_announcements.txt").filter_map(parse_announcement).peekable();
 	let mut probe_results = open_file("probes.txt").filter_map(parse_probe).peekable();
 
-	let channel_values = HashMap::new();
+	let channel_values = Mutex::new(HashMap::new());
 	let utxo_values = FundingValueProvider { channel_values };
-	let mut utxo_lookup = Some(&utxo_values);
-utxo_lookup = None;
+	let utxo_lookup = Some(&utxo_values);
 
 	let mut state = do_setup();
 
@@ -172,7 +176,7 @@ utxo_lookup = None;
 		}
 
 		let next_update_ts = next_update.map(|(t, _)| *t).unwrap_or(u64::MAX);
-		let next_announce_ts = next_announcement.map(|(t, _)| *t).unwrap_or(u64::MAX);
+		let next_announce_ts = next_announcement.map(|(t, _, _)| *t).unwrap_or(u64::MAX);
 		let next_probe_ts = next_probe_result.map(|res| res.timestamp).unwrap_or(u64::MAX);
 		match (next_update_ts < next_announce_ts, next_announce_ts < next_probe_ts, next_update_ts < next_probe_ts) {
 			(true, _, true) => {
@@ -184,7 +188,12 @@ utxo_lookup = None;
 				} else { unreachable!() }
 			}
 			(false, true, _) => {
-				if let Some((_, announcement)) = announcements.next() {
+				if let Some((_, funding_sats, announcement)) = announcements.next() {
+					let a_key = announcement.contents.bitcoin_key_1.try_into().unwrap();
+					let b_key = announcement.contents.bitcoin_key_2.try_into().unwrap();
+					let script_pubkey = make_funding_redeemscript(&a_key, &b_key).to_p2wsh();
+					let txout = TxOut { script_pubkey, value: bitcoin::Amount::from_sat(funding_sats) };
+					utxo_values.channel_values.lock().unwrap().insert(announcement.contents.short_channel_id, txout);
 					graph.update_channel_from_unsigned_announcement(&announcement.contents, &utxo_lookup)
 						.expect("announcements should be valid");
 				} else { unreachable!() }
