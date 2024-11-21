@@ -9,3 +9,8 @@ edition = "2021"
 bitcoin = "0.32"
 # Note that we have to turn on no-std to disable the timestamp range verification on channel_update
 lightning = { version = "0.0.125", default-features = false, features = ["no-std"] }
+
+[patch.crates-io]
+# In order to properly test the LDK model, we need a small patch which is working its way upstream.
+# If you're testing your own model you can remove this patch.
+lightning = { git = "https://git.bitcoin.ninja/rust-lightning", branch = "2024-11-live-success-prob-125" }
