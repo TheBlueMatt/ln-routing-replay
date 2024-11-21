@@ -15,15 +15,18 @@ use lightning::util::ser::Readable;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Mutex;
 
-struct DevNullLogger;
+pub struct DevNullLogger;
 impl Logger for DevNullLogger {
-	fn log(&self, record: Record) {
-		#[cfg(debug_assertions)]
-		eprintln!("{}", record.args);
-	}
+	fn log(&self, _: Record) {}
+}
+/// Dirty hack to make `DevNullLogger` a `Deref`.
+impl Deref for DevNullLogger {
+	type Target = DevNullLogger;
+	fn deref(&self) -> &DevNullLogger { self }
 }
 
 fn open_file(f: &'static str) -> impl Iterator<Item = String> {
@@ -57,37 +60,54 @@ struct ParsedProbeResult {
 }
 
 impl ParsedProbeResult {
-	fn into_pub(self, graph: ReadOnlyNetworkGraph) -> ProbeResult {
+	fn try_into_pub(self, graph: ReadOnlyNetworkGraph) -> Option<ProbeResult> {
 		let mut channels_with_sufficient_liquidity = Vec::new();
 		let mut src_node_id = self.starting_node;
 		for hop in self.passed_chans {
+			let chan = graph.channels().get(&hop.scid)
+				.expect("Missing channel in probe results");
+			if chan.one_to_two.is_none() || chan.two_to_one.is_none() {
+				// This shouldn't ever happen as LDK shouldn't have actually tried to send over
+				// this path, but sometimes it does (presumably due to some delayed graph pruning).
+				// Its fairly rare, and results in less data than the model under test might want,
+				// so we just skip such paths.
+				return None;
+			}
+			let dst_node_id =
+				if chan.node_one == src_node_id { chan.node_two } else { chan.node_one };
 			channels_with_sufficient_liquidity.push(DirectedChannel {
 				src_node_id,
+				dst_node_id,
 				short_channel_id: hop.scid,
 				amount_msat: hop.amount,
 			});
+			src_node_id = dst_node_id;
+		}
+		let channel_that_rejected_payment = self.failed_chan.map(|hop| {
 			let chan = graph.channels().get(&hop.scid)
 				.expect("Missing channel in probe results");
-			src_node_id =
+			let dst_node_id =
 				if chan.node_one == src_node_id { chan.node_two } else { chan.node_one };
-		}
-		let channel_that_rejected_payment = self.failed_chan.map(|hop|
 			DirectedChannel {
 				src_node_id,
+				dst_node_id,
 				short_channel_id: hop.scid,
 				amount_msat: hop.amount,
 			}
-		);
-		ProbeResult {
+		});
+		Some(ProbeResult {
 			timestamp: self.timestamp,
 			channels_with_sufficient_liquidity,
 			channel_that_rejected_payment,
-		}
+		})
 	}
 }
 
 fn parse_probe(line: String) -> Option<ParsedProbeResult> {
 	macro_rules! dbg_unw { ($val: expr) => { { let v = $val; debug_assert!(v.is_some()); v? } } }
+	if line.contains("unknown path success prob, probably had a duplicate") {
+		return None;
+	}
 	let timestamp_string = dbg_unw!(line.split_once(' ')).0;
 	let timestamp = dbg_unw!(timestamp_string.parse::<u64>().ok());
 	let useful_out = dbg_unw!(line.split_once(" - start at ")).1;
@@ -155,7 +175,7 @@ impl UtxoLookup for FundingValueProvider {
 }
 
 pub fn main() {
-	let graph = NetworkGraph::new(Network::Bitcoin, &DevNullLogger);
+	let graph = NetworkGraph::new(Network::Bitcoin, DevNullLogger);
 	let mut updates = open_file("channel_updates.txt").filter_map(parse_update).peekable();
 	let mut announcements = open_file("channel_announcements.txt").filter_map(parse_announcement).peekable();
 	let mut probe_results = open_file("probes.txt").filter_map(parse_probe).peekable();
@@ -164,7 +184,7 @@ pub fn main() {
 	let utxo_values = FundingValueProvider { channel_values };
 	let utxo_lookup = Some(&utxo_values);
 
-	let mut state = do_setup();
+	let mut state = do_setup(&graph);
 
 	loop {
 		let next_update = updates.peek();
@@ -192,7 +212,7 @@ pub fn main() {
 					let a_key = announcement.contents.bitcoin_key_1.try_into().unwrap();
 					let b_key = announcement.contents.bitcoin_key_2.try_into().unwrap();
 					let script_pubkey = make_funding_redeemscript(&a_key, &b_key).to_p2wsh();
-					let txout = TxOut { script_pubkey, value: bitcoin::Amount::from_sat(funding_sats) };
+					let txout = TxOut { script_pubkey, value: Amount::from_sat(funding_sats) };
 					utxo_values.channel_values.lock().unwrap().insert(announcement.contents.short_channel_id, txout);
 					graph.update_channel_from_unsigned_announcement(&announcement.contents, &utxo_lookup)
 						.expect("announcements should be valid");
@@ -200,7 +220,9 @@ pub fn main() {
 			}
 			_ => {
 				if let Some(res) = probe_results.next() {
-					process_probe_result(graph.read_only(), res.into_pub(graph.read_only()), &mut state);
+					if let Some(res) = res.try_into_pub(graph.read_only()) {
+						process_probe_result(graph.read_only(), res, &mut state);
+					}
 				} else { unreachable!() }
 			}
 		}

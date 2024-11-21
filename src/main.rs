@@ -1,6 +1,7 @@
 mod internal;
+use internal::DevNullLogger;
 
-use lightning::routing::gossip::{NodeId, ReadOnlyNetworkGraph};
+use lightning::routing::gossip::{NetworkGraph, NodeId, ReadOnlyNetworkGraph};
 
 /// The simulation state.
 ///
@@ -9,7 +10,7 @@ pub struct State {
 }
 
 /// Creates a new [`State`] before any probe results are processed.
-pub fn do_setup() -> State {
+pub fn do_setup<'a>(graph: &'a NetworkGraph<DevNullLogger>) -> State {
 	State {}
 }
 
@@ -33,6 +34,8 @@ pub fn results_complete(state: State) {
 pub struct DirectedChannel {
 	/// The source node of a channel
 	pub src_node_id: NodeId,
+	/// The target node of this channel hop
+	pub dst_node_id: NodeId,
 	/// The SCID of the channel
 	pub short_channel_id: u64,
 	/// The amount which may (or may not) have been sendable over this channel
