@@ -2,7 +2,6 @@ use crate::{do_setup, process_probe_result, results_complete, DirectedChannel, P
 
 use bitcoin::constants::ChainHash;
 use bitcoin::network::Network;
-use bitcoin::hex::FromHex;
 use bitcoin::{Amount, TxOut};
 
 use lightning::ln::chan_utils::make_funding_redeemscript;
@@ -14,7 +13,7 @@ use lightning::util::ser::Readable;
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -29,15 +28,9 @@ impl Deref for DevNullLogger {
 	fn deref(&self) -> &DevNullLogger { self }
 }
 
-fn open_file(f: &'static str) -> impl Iterator<Item = String> {
+fn open_file(f: &'static str) -> BufReader<File> {
 	match File::open(f) {
-		Ok(file) => BufReader::new(file).lines().into_iter().map(move |res| match res {
-			Ok(line) => line,
-			Err(e) => {
-				eprintln!("Failed to read line from file {}: {:?}", f, e);
-				std::process::exit(1);
-			},
-		}),
+		Ok(file) => BufReader::new(file),
 		Err(e) => {
 			eprintln!("Failed to open {}, please fetch from https://bitcoin.ninja/ln-routing-replay/{}: {:?}", f, f, e);
 			std::process::exit(1);
@@ -103,7 +96,12 @@ impl ParsedProbeResult {
 	}
 }
 
-fn parse_probe(line: String) -> Option<ParsedProbeResult> {
+fn parse_probe(line: Result<String, std::io::Error>) -> Option<ParsedProbeResult> {
+	if line.is_err() {
+		eprintln!("Failed to read line from parse results: {:?}", line);
+		std::process::exit(1);
+	}
+	let line = line.unwrap();
 	macro_rules! dbg_unw { ($val: expr) => { { let v = $val; debug_assert!(v.is_some()); v? } } }
 	if line.contains("unknown path success prob, probably had a duplicate") {
 		return None;
@@ -143,23 +141,50 @@ fn parse_probe(line: String) -> Option<ParsedProbeResult> {
 	})
 }
 
-fn parse_update(line: String) -> Option<(u64, ChannelUpdate)> {
-	let (timestamp, update_hex) = line.split_once('|').expect("Invalid ChannelUpdate line");
-	let update_bytes = Vec::<u8>::from_hex(update_hex).ok().expect("Invalid ChannelUpdate hex");
-	let update = Readable::read(&mut &update_bytes[..]);
-	debug_assert!(update.is_ok());
-	Some((timestamp.parse().ok()?, update.ok()?))
+struct UpdateIter(BufReader<File>);
+impl Iterator for UpdateIter {
+	type Item = (u64, ChannelUpdate);
+	fn next(&mut self) -> Option<(u64, ChannelUpdate)> {
+		macro_rules! read { ($bytes: expr) => { {
+			if let Err(_) = self.0.read_exact(&mut $bytes[..]) {
+				return None;
+			}
+		} } }
+		let mut ts_bytes = [0u8; 8];
+		read!(ts_bytes);
+		let mut len_bytes = [0u8; 2];
+		read!(len_bytes);
+		let len = u16::from_le_bytes(len_bytes) as usize;
+		let mut update_bytes = vec![0; len];
+		read!(update_bytes);
+		let update = Readable::read(&mut &update_bytes[..]);
+		debug_assert!(update.is_ok());
+		Some((u64::from_le_bytes(ts_bytes), update.ok()?))
+	}
 }
 
-fn parse_announcement(line: String) -> Option<(u64, u64, ChannelAnnouncement)> {
-	let mut fields = line.split('|');
-	let timestamp = fields.next().expect("Invalid ChannelAnnouncement line");
-	let funding_sats = fields.next().expect("Invalid ChannelAnnouncement line");
-	let ann_hex = fields.next().expect("Invalid ChannelAnnouncement line");
-	let ann_bytes = Vec::<u8>::from_hex(ann_hex).ok().expect("Invalid ChannelAnnouncement hex");
-	let announcement = Readable::read(&mut &ann_bytes[..]);
-	debug_assert!(announcement.is_ok());
-	Some((timestamp.parse().ok()?, funding_sats.parse().ok()?, announcement.ok()?))
+struct AnnouncementIter(BufReader<File>);
+impl Iterator for AnnouncementIter {
+	type Item = (u64, u64, ChannelAnnouncement);
+	fn next(&mut self) -> Option<(u64, u64, ChannelAnnouncement)> {
+		macro_rules! read { ($bytes: expr) => { {
+			if let Err(_) = self.0.read_exact(&mut $bytes[..]) {
+				return None;
+			}
+		} } }
+		let mut ts_bytes = [0u8; 8];
+		read!(ts_bytes);
+		let mut funding_bytes = [0u8; 8];
+		read!(funding_bytes);
+		let mut len_bytes = [0u8; 2];
+		read!(len_bytes);
+		let len = u16::from_le_bytes(len_bytes) as usize;
+		let mut announcement_bytes = vec![0; len];
+		read!(announcement_bytes);
+		let announcement = Readable::read(&mut &announcement_bytes[..]);
+		debug_assert!(announcement.is_ok());
+		Some((u64::from_le_bytes(ts_bytes), u64::from_le_bytes(funding_bytes), announcement.ok()?))
+	}
 }
 
 struct FundingValueProvider {
@@ -176,9 +201,9 @@ impl UtxoLookup for FundingValueProvider {
 
 pub fn main() {
 	let graph = NetworkGraph::new(Network::Bitcoin, DevNullLogger);
-	let mut updates = open_file("channel_updates.txt").filter_map(parse_update).peekable();
-	let mut announcements = open_file("channel_announcements.txt").filter_map(parse_announcement).peekable();
-	let mut probe_results = open_file("probes.txt").filter_map(parse_probe).peekable();
+	let mut updates = UpdateIter(open_file("channel_updates.bin")).peekable();
+	let mut announcements = AnnouncementIter(open_file("channel_announcements.bin")).peekable();
+	let mut probe_results = open_file("probes.txt").lines().into_iter().filter_map(parse_probe).peekable();
 
 	let channel_values = Mutex::new(HashMap::new());
 	let utxo_values = FundingValueProvider { channel_values };
