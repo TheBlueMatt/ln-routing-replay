@@ -29,6 +29,9 @@ pub fn do_setup<'a>(graph: &'a NetworkGraph<DevNullLogger>) -> State {
 /// The network graph as it existed at `result.timestamp` is provided, as well as a reference to
 /// the current state.
 pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeResult, state: &mut State) {
+	// Note that the dataset will be regularly updated. If you wish your results to be
+	// reproducible, you should add an early return here at some cutoff timestamp.
+
 	// Update the model's time
 	use lightning::routing::scoring::ScoreUpdate;
 	let cur_time = std::time::Duration::from_secs(result.timestamp);
