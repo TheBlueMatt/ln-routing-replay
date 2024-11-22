@@ -11,16 +11,20 @@ pub struct State<'a> {
 	/// assigns to results.
 	scorer: lightning::routing::scoring::ProbabilisticScorer<&'a NetworkGraph<DevNullLogger>, DevNullLogger>,
 	// We demonstrate calculating log-loss of the LDK historical model
-	loss_sum: f64,
-	result_count: u64,
+	success_loss_sum: f64,
+	success_result_count: u64,
+	failure_loss_sum: f64,
+	failure_result_count: u64,
 }
 
 /// Creates a new [`State`] before any probe results are processed.
 pub fn do_setup<'a>(graph: &'a NetworkGraph<DevNullLogger>) -> State {
 	State {
 		scorer: lightning::routing::scoring::ProbabilisticScorer::new(Default::default(), graph, internal::DevNullLogger),
-		loss_sum: 0.0,
-		result_count: 0,
+		success_loss_sum: 0.0,
+		success_result_count: 0,
+		failure_loss_sum: 0.0,
+		failure_result_count: 0,
 	}
 }
 
@@ -50,8 +54,8 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 					.expect("We should have some estimated probability, even without history data")
 			);
 		if model_probability < 0.01 { model_probability = 0.01; }
-		state.loss_sum -= model_probability.log2();
-		state.result_count += 1;
+		state.success_loss_sum -= model_probability.log2();
+		state.success_result_count += 1;
 	}
 	if let Some(hop) = &result.channel_that_rejected_payment {
 		// You can get additional information about the channel from the network_graph:
@@ -65,8 +69,8 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 					.expect("We should have some estimated probability, even without history data")
 			);
 		if model_probability > 0.99 { model_probability = 0.99; }
-		state.loss_sum -= (1.0 - model_probability).log2();
-		state.result_count += 1;
+		state.failure_loss_sum -= (1.0 - model_probability).log2();
+		state.failure_result_count += 1;
 	}
 
 	// Update the model with the information we learned
@@ -98,7 +102,13 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 /// This is run after all probe results have been processed, and should be used for printing
 /// results or any required teardown.
 pub fn results_complete(state: State) {
-	println!("Avg log-loss {}", state.loss_sum / (state.result_count as f64));
+	// We break out log-loss for failure and success hops as there are substantially more
+	// succeeding hops than there are failing hops.
+	println!("Avg success log-loss {}", state.success_loss_sum / (state.success_result_count as f64));
+	println!("Avg failure log-loss {}", state.failure_loss_sum / (state.failure_result_count as f64));
+	let loss_sum = state.success_loss_sum + state.failure_loss_sum;
+	let result_count = state.success_result_count + state.failure_result_count;
+	println!("Avg log-loss {}", loss_sum / (result_count as f64));
 }
 
 /// A hop in a route, consisting of a channel and the source public key, as well as the amount
