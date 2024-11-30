@@ -126,9 +126,9 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 		});
 	}
 	if let Some(hop) = result.channel_that_rejected_payment {
-		state.scorer.payment_path_failed(&path, hop.short_channel_id, cur_time);
+		state.scorer.probe_failed(&path, hop.short_channel_id, cur_time);
 	} else {
-		state.scorer.payment_path_successful(&path, cur_time);
+		state.scorer.probe_successful(&path, cur_time);
 	}
 }
 
