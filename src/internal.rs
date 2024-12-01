@@ -102,8 +102,11 @@ fn parse_probe(line: Result<String, std::io::Error>) -> Option<ParsedProbeResult
 		std::process::exit(1);
 	}
 	let line = line.unwrap();
-	macro_rules! dbg_unw { ($val: expr) => { { let v = $val; debug_assert!(v.is_some()); v? } } }
+	macro_rules! dbg_unw { ($val: expr) => { { let v = $val; debug_assert!(v.is_some(), "{}", line); v? } } }
 	if line.contains("unknown path success prob, probably had a duplicate") {
+		return None;
+	}
+	if line.contains("path failed at first hop") {
 		return None;
 	}
 	let timestamp_string = dbg_unw!(line.split_once(' ')).0;
