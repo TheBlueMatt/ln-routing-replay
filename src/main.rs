@@ -76,9 +76,11 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 	// At each hop, we add two new entries - one for the LDK historical model and one for the naive
 	// live bounds model.
 	let mut evaluate_hop = |hop: &DirectedChannel, success| {
+		// While the historical model should always have results for us, its possible that the node
+		// doing the probing had a different state than the node that generates the gossip
+		// snapshots. Thus, if we fail, we simply ignore ths hop.
 		let hist_model_probability =
-			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), true)
-			.expect("We should have some estimated probability, even without history data");
+			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), true)?;
 		let have_hist_results =
 			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), false)
 			.is_some();
@@ -91,6 +93,7 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 		let have_live_data = state.scorer.estimated_channel_liquidity_range(hop.short_channel_id, &hop.dst_node_id).is_some();
 		let flags = LIVE | if have_live_data { 0 } else { NO_DATA };
 		update_data_with_result(flags, live_model_probability, success);
+		Some(()) // We don't use the return value, but want to use `?` above.
 	};
 
 	// Evaluate the model by passing each hop which succeeded as well as the final failing hop to
