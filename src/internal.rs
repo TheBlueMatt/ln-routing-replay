@@ -57,11 +57,20 @@ impl ParsedProbeResult {
 		let mut channels_with_sufficient_liquidity = Vec::new();
 		let mut src_node_id = self.starting_node;
 		for hop in self.passed_chans {
-			let chan = graph.channels().get(&hop.scid)
-				.expect("Missing channel in probe results");
+			let chan = graph.channels().get(&hop.scid);
+			if chan.is_none() {
+				// This shouldn't ever happen as LDK shouldn't have actually tried to send over
+				// this path, but sometimes it does as the graph datasource and probing data
+				// datasources are different.
+				// Its fairly rare, and results in less data than the model under test might want,
+				// so we just skip such paths.
+				return None;
+			}
+			let chan = chan.unwrap();
 			if chan.one_to_two.is_none() || chan.two_to_one.is_none() {
 				// This shouldn't ever happen as LDK shouldn't have actually tried to send over
-				// this path, but sometimes it does (presumably due to some delayed graph pruning).
+				// this path, but sometimes it does as the graph datasource and probing data
+				// datasources are different.
 				// Its fairly rare, and results in less data than the model under test might want,
 				// so we just skip such paths.
 				return None;
@@ -76,9 +85,17 @@ impl ParsedProbeResult {
 			});
 			src_node_id = dst_node_id;
 		}
-		let channel_that_rejected_payment = self.failed_chan.map(|hop| {
-			let chan = graph.channels().get(&hop.scid)
-				.expect("Missing channel in probe results");
+		let chan_hop = self.failed_chan.map(|hop| (graph.channels().get(&hop.scid), hop));
+		if let Some((None, _)) = chan_hop {
+			// This shouldn't ever happen as LDK shouldn't have actually tried to send over
+			// this path, but sometimes it does as the graph datasource and probing data
+			// datasources are different.
+			// Its fairly rare, and results in less data than the model under test might want,
+			// so we just skip such paths.
+			return None;
+		}
+		let channel_that_rejected_payment = chan_hop.map(|(chan, hop)| {
+			let chan = chan.unwrap();
 			let dst_node_id =
 				if chan.node_one == src_node_id { chan.node_two } else { chan.node_one };
 			DirectedChannel {
