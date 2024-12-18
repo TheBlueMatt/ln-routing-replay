@@ -80,7 +80,11 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 		// doing the probing had a different state than the node that generates the gossip
 		// snapshots. Thus, if we fail, we simply ignore ths hop.
 		let hist_model_probability =
-			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), true)?;
+			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), true)?
+			// "optimal" value here is closer to 0.79, but the new default parameters have a 0.1024
+			// ratio between the per-hop and probability-based cost, so we apply the equivalent
+			// implied probability cost (1/10**0.1024) here.
+			* 0.7899507213358165;
 		let have_hist_results =
 			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), false)
 			.is_some();
