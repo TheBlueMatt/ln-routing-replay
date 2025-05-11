@@ -223,7 +223,8 @@ pub fn main() {
 	let graph = NetworkGraph::new(Network::Bitcoin, DevNullLogger);
 	let mut updates = UpdateIter(open_file("channel_updates.bin")).peekable();
 	let mut announcements = AnnouncementIter(open_file("channel_announcements.bin")).peekable();
-	let mut probe_results = open_file("probes.txt").lines().into_iter().filter_map(parse_probe).peekable();
+	let probe_count = open_file("probes.txt").lines().count();
+	let mut probe_results = open_file("probes.txt").lines().into_iter().filter_map(parse_probe).enumerate().peekable();
 
 	let channel_values = Mutex::new(HashMap::new());
 	let utxo_values = FundingValueProvider { channel_values };
@@ -242,7 +243,7 @@ pub fn main() {
 
 		let next_update_ts = next_update.map(|(t, _)| *t).unwrap_or(u64::MAX);
 		let next_announce_ts = next_announcement.map(|(t, _, _)| *t).unwrap_or(u64::MAX);
-		let next_probe_ts = next_probe_result.map(|res| res.timestamp).unwrap_or(u64::MAX);
+		let next_probe_ts = next_probe_result.map(|(_, res)| res.timestamp).unwrap_or(u64::MAX);
 		match (next_update_ts < next_announce_ts, next_announce_ts < next_probe_ts, next_update_ts < next_probe_ts) {
 			(true, _, true) => {
 				if let Some((_, update)) = updates.next() {
@@ -264,9 +265,12 @@ pub fn main() {
 				} else { unreachable!() }
 			}
 			_ => {
-				if let Some(res) = probe_results.next() {
+				if let Some((probe_id, res)) = probe_results.next() {
 					if let Some(res) = res.try_into_pub(graph.read_only()) {
 						process_probe_result(graph.read_only(), res, &mut state);
+					}
+					if probe_id % (probe_count / 10) == 0 {
+						println!("Processed {}/{} probes", probe_id, probe_count);
 					}
 				} else { unreachable!() }
 			}
