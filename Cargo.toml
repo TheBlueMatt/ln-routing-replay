@@ -7,3 +7,6 @@ edition = "2021"
 bitcoin = "0.32"
 # Note that we have to turn on no-std to disable the timestamp range verification on channel_update
 lightning = { version = "0.1", default-features = false }
+
+[patch.crates-io]
+lightning = { git = "https://git.bitcoin.ninja/rust-lightning", branch = "2025-05-sim-run" }

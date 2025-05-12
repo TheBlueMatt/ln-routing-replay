@@ -17,6 +17,9 @@ const NO_DATA: usize = 2;
 /// historical model.
 const LIVE: usize = 4;
 
+static ALL_PENALTY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HALF_LIFE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// The simulation state.
 ///
 /// You're free to put whatever you want here.
@@ -35,8 +38,10 @@ pub struct State<'a> {
 
 /// Creates a new [`State`] before any probe results are processed.
 pub fn do_setup<'a>(graph: &'a NetworkGraph<DevNullLogger>) -> State {
+	let mut decay_params: lightning::routing::scoring::ProbabilisticScoringDecayParameters = Default::default();
+	decay_params.liquidity_offset_half_life = std::time::Duration::from_millis(HALF_LIFE.load(std::sync::atomic::Ordering::Acquire)); // default 6 hours
 	State {
-		scorer: lightning::routing::scoring::ProbabilisticScorer::new(Default::default(), graph, internal::DevNullLogger),
+		scorer: lightning::routing::scoring::ProbabilisticScorer::new(decay_params, graph, internal::DevNullLogger),
 		log_loss_sum: [0.0; CATEGORIES],
 		result_count: [0; CATEGORIES],
 	}
@@ -76,6 +81,7 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 	// At each hop, we add two new entries - one for the LDK historical model and one for the naive
 	// live bounds model.
 	let mut evaluate_hop = |hop: &DirectedChannel, success| {
+		let penalty: f64 = unsafe { std::mem::transmute(ALL_PENALTY.load(std::sync::atomic::Ordering::Acquire)) };
 		// While the historical model should always have results for us, its possible that the node
 		// doing the probing had a different state than the node that generates the gossip
 		// snapshots. Thus, if we fail, we simply ignore ths hop.
@@ -84,7 +90,7 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 			// "optimal" value here is closer to 0.79, but the new default parameters have a 0.1024
 			// ratio between the per-hop and probability-based cost, so we apply the equivalent
 			// implied probability cost (1/10**0.1024) here.
-			* 0.7899507213358165;
+			* penalty;
 		let have_hist_results =
 			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), false)
 			.is_some();
@@ -139,9 +145,14 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 	}
 }
 
+static LOSS_SUMS: std::sync::Mutex<[f64; CATEGORIES]> = std::sync::Mutex::new([0.0; CATEGORIES]);
+static RESULT_COUNT: std::sync::Mutex<[u64; CATEGORIES]> = std::sync::Mutex::new([0; CATEGORIES]);
+
 /// This is run after all probe results have been processed, and should be used for printing
 /// results or any required teardown.
 pub fn results_complete(state: State) {
+*LOSS_SUMS.lock().unwrap() = state.log_loss_sum;
+*RESULT_COUNT.lock().unwrap() = state.result_count;
 	// We break out log-loss for failure and success hops and print averages between the two
 	// (rather than in aggregate) as there are substantially more succeeding hops than there are
 	// failing hops.
@@ -207,5 +218,65 @@ pub struct ProbeResult {
 }
 
 fn main() {
-	internal::main();
+	let args: Vec<String> = std::env::args().collect();
+	let mut no_data: u64 = args[1].parse().unwrap();
+	//let mut best_no_data = no_data;
+	let mut all_penalty: f64 = args[2].parse().unwrap();
+	//let mut best_all_penalty = all_penalty;
+	let hl: u64 = args[3].parse().unwrap();
+	HALF_LIFE.store(hl, std::sync::atomic::Ordering::Release);
+    let pow: u8 = args[4].parse().unwrap();
+    lightning::routing::scoring::POW.store(pow, std::sync::atomic::Ordering::Release);
+    let mut addl = 0.0f64;
+    if args.len() >= 6 {
+        addl = args[5].parse().unwrap_or(0.0);
+    }
+    lightning::routing::scoring::ADDL.store(unsafe { core::mem::transmute(addl) }, std::sync::atomic::Ordering::Release);
+    let mut reweight = 2.0f64;
+    if args.len() >= 7 {
+        reweight = args[6].parse().unwrap_or(2.0);
+    }
+    lightning::routing::scoring::REWEIGHT_POINTS.store(unsafe { core::mem::transmute(reweight) }, std::sync::atomic::Ordering::Release);
+	//let best_total_diff = 10.0;
+	let mut optimized_no_datas = vec![];
+	loop {
+		optimized_no_datas.resize(std::cmp::max(optimized_no_datas.len(), no_data as usize + 1), (10.0, 0.0));
+		if optimized_no_datas[no_data as usize].0 < 10.0 {
+			break;
+		}
+		if no_data < 64 { break; }
+
+		lightning::routing::scoring::NO_DATA_PENALTY.store(no_data, std::sync::atomic::Ordering::Release);
+		ALL_PENALTY.store(unsafe { std::mem::transmute(all_penalty) }, std::sync::atomic::Ordering::Release);
+		println!("\nTesting with no-data penalty of {}/64 and all-penalty of {}. Positive fudge of {}/10", no_data, all_penalty, addl);
+		internal::main();
+		let loss_sums = LOSS_SUMS.lock().unwrap();
+		let res_count = RESULT_COUNT.lock().unwrap();
+		let data_success = loss_sums[SUCCESS] / (res_count[SUCCESS] as f64);
+		let data_fail = loss_sums[0] / (res_count[0] as f64);
+		let no_data_success = loss_sums[SUCCESS|NO_DATA] / (res_count[SUCCESS|NO_DATA] as f64);
+		let no_data_fail = loss_sums[NO_DATA] / (res_count[NO_DATA] as f64);
+		let data_diff = (data_fail - data_success).abs();
+		let no_data_diff = (no_data_fail - no_data_success).abs();
+		let total_diff = data_diff + no_data_diff;
+		if data_diff >= 0.001 {
+			println!("Data diff too high, trying to fine-tune");
+			if data_success < data_fail {
+				all_penalty -= (1.0 - 0.5f64.powf(data_diff)) / 2.0;
+			} else {
+				all_penalty += (1.0 - 0.5f64.powf(data_diff)) / 2.0;
+			}
+			continue;
+		} else if total_diff < optimized_no_datas[no_data as usize].0 {
+            println!("No-data penalty of {} is good enough with a total diff of {}", no_data, total_diff);
+			optimized_no_datas[no_data as usize] = (total_diff, all_penalty);
+        }
+		if no_data_success < no_data_fail {
+			no_data += 1;
+		} else {
+			no_data -= 1;
+		}
+	}
+	let res = optimized_no_datas.iter().enumerate().min_by(|(_, (diff_a, _)), (_, (diff_b, _))| diff_a.partial_cmp(&diff_b).unwrap()).unwrap();
+	println!("Minimum is pos no-data penalty {}/64, all-penalty {}, with a total diff of {}", res.0, res.1.1, res.1.0);
 }
