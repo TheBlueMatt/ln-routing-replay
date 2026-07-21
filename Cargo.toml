@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 bitcoin = "0.32"
 # Note that we have to turn on no-std to disable the timestamp range verification on channel_update
-lightning = { version = "0.1", default-features = false }
+lightning = { version = "0.2", default-features = false }

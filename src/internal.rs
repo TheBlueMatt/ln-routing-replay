@@ -9,7 +9,7 @@ use lightning::ln::msgs::{ChannelAnnouncement, ChannelUpdate};
 use lightning::routing::gossip::{NetworkGraph, NodeId, ReadOnlyNetworkGraph};
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Logger, Record};
-use lightning::util::ser::Readable;
+use lightning::util::ser::LengthReadable;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -177,7 +177,7 @@ impl Iterator for UpdateIter {
 		let len = u16::from_le_bytes(len_bytes) as usize;
 		let mut update_bytes = vec![0; len];
 		read!(update_bytes);
-		let update = Readable::read(&mut &update_bytes[..]);
+		let update = LengthReadable::read_from_fixed_length_buffer(&mut &update_bytes[..]);
 		debug_assert!(update.is_ok());
 		Some((u64::from_le_bytes(ts_bytes), update.ok()?))
 	}
@@ -201,7 +201,7 @@ impl Iterator for AnnouncementIter {
 		let len = u16::from_le_bytes(len_bytes) as usize;
 		let mut announcement_bytes = vec![0; len];
 		read!(announcement_bytes);
-		let announcement = Readable::read(&mut &announcement_bytes[..]);
+		let announcement = LengthReadable::read_from_fixed_length_buffer(&mut &announcement_bytes[..]);
 		debug_assert!(announcement.is_ok());
 		Some((u64::from_le_bytes(ts_bytes), u64::from_le_bytes(funding_bytes), announcement.ok()?))
 	}
