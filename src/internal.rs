@@ -1,4 +1,4 @@
-use crate::{do_setup, process_probe_result, results_complete, DirectedChannel, ProbeResult};
+use crate::{do_setup, process_probe_result, results_complete, DirectedChannel, ProbeResult, ProbePathSelection};
 
 use bitcoin::constants::ChainHash;
 use bitcoin::network::Network;
@@ -50,6 +50,7 @@ struct ParsedProbeResult {
 	starting_node: NodeId,
 	passed_chans: Vec<ParsedChannel>,
 	failed_chan: Option<ParsedChannel>,
+	path_selection: ProbePathSelection,
 }
 
 impl ParsedProbeResult {
@@ -109,6 +110,7 @@ impl ParsedProbeResult {
 			timestamp: self.timestamp,
 			channels_with_sufficient_liquidity,
 			channel_that_rejected_payment,
+			path_selection: self.path_selection,
 		})
 	}
 }
@@ -159,6 +161,7 @@ fn parse_probe(line: Result<String, std::io::Error>) -> Option<ParsedProbeResult
 		starting_node: dbg_unw!(NodeId::from_str(src_node).ok()),
 		passed_chans,
 		failed_chan,
+		path_selection: if line.contains("rand-path") { ProbePathSelection::RandomGraphWalk } else { ProbePathSelection::LdkPathfinder },
 	})
 }
 

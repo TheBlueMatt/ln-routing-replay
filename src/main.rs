@@ -192,6 +192,23 @@ pub struct DirectedChannel {
 	pub amount_msat: u64,
 }
 
+/// The method through which the path was selected.
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub enum ProbePathSelection {
+	/// This probe was sent by selecting a random node from the network graph and sending a random
+	/// amount (within some bounds) to it by using LDK's built-in pathfinder. After support was
+	/// added, the pathfinder switched to also seeking to try paths which had not been recently
+	/// attempted.
+	///
+	/// In some rare cases the destination node and amount may have been selected manually.
+	LdkPathfinder,
+	/// This probe was sent by doing a random walk over the network graph. An amount was selected at
+	/// random (within some bounds) and then the graph was walked at random, at each hop selecting a
+	/// random channel (from the set which can support the amount being sent plus a small fudge
+	/// factor) and then moving to the next node.
+	RandomGraphWalk,
+}
+
 /// The result of a probe through the lightning network.
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct ProbeResult {
@@ -204,6 +221,12 @@ pub struct ProbeResult {
 	pub channels_with_sufficient_liquidity: Vec<DirectedChannel>,
 	/// The channel at which the probe failed, if any
 	pub channel_that_rejected_payment: Option<DirectedChannel>,
+	/// The type of probe.
+	///
+	/// The dataset contains several types of probes - historically most probes were sent by
+	/// generating a path to a randomly-selected node with LDK's built-in pathfinder, however more
+	/// recent paths may also be from random graph walks.
+	pub path_selection: ProbePathSelection,
 }
 
 fn main() {
