@@ -298,7 +298,7 @@ pub fn main() {
 					if let Some(res) = res.try_into_pub(graph.read_only()) {
 						process_probe_result(graph.read_only(), res, &mut state);
 					}
-					if probe_id % (probe_count / 10) == 0 {
+					if probe_id % (probe_count / 20) == 0 {
 						println!("Processed {}/{} probes", probe_id, probe_count);
 					}
 				} else { unreachable!() }
