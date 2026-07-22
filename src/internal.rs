@@ -133,6 +133,7 @@ fn parse_probe(line: Result<String, std::io::Error>) -> Option<ParsedProbeResult
 	let mut passed_chans = Vec::new();
 	let mut failed_chan = None;
 	for hop in path_string.split(',') {
+		let hop = hop.trim_start();
 		let (_ldk_prob, fields) = dbg_unw!(hop.split_once('('));
 		let mut fields = fields.split(' ');
 		let amount_string = dbg_unw!(fields.next());
