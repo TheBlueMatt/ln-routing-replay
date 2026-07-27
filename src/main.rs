@@ -7,7 +7,7 @@ use lightning::routing::gossip::{NetworkGraph, NodeId, ReadOnlyNetworkGraph};
 /// accuracy of two different models across different types of results.
 /// Ultimately we end up with `CATEGORIES` outputs, with averages across the types computed in
 /// [`results_complete`].
-const CATEGORIES: usize = 1 << 3;
+const CATEGORIES: usize = 1 << 4;
 /// Entries with this flag are those for hops that succeeded.
 const SUCCESS: usize = 1;
 /// Entries with this flag fell back to probability estimation without any historical probing
@@ -16,6 +16,8 @@ const NO_DATA: usize = 2;
 /// Entries with this flag are for the live bounds model. Entries without this flag are for the LDK
 /// historical model.
 const LIVE: usize = 4;
+/// Entries with this flag are for probes which were selected by random walk.
+const RANDOM_WALK_PROBE: usize = 8;
 
 /// The simulation state.
 ///
@@ -88,14 +90,17 @@ pub fn process_probe_result(network_graph: ReadOnlyNetworkGraph, result: ProbeRe
 		let have_hist_results =
 			state.scorer.historical_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default(), false)
 			.is_some();
-		let flags = if have_hist_results { 0 } else { NO_DATA };
+		let flags = if have_hist_results { 0 } else { NO_DATA }
+			| if result.path_selection == ProbePathSelection::RandomGraphWalk { RANDOM_WALK_PROBE } else { 0 };
 		update_data_with_result(flags, hist_model_probability, success);
 
 		let live_model_probability =
 			state.scorer.live_estimated_payment_success_probability(hop.short_channel_id, &hop.dst_node_id, hop.amount_msat, &Default::default())
 			.expect("We should have some estimated probability, even without past data");
 		let have_live_data = state.scorer.estimated_channel_liquidity_range(hop.short_channel_id, &hop.dst_node_id).is_some();
-		let flags = LIVE | if have_live_data { 0 } else { NO_DATA };
+		let flags = LIVE
+			| if have_live_data { 0 } else { NO_DATA }
+			| if result.path_selection == ProbePathSelection::RandomGraphWalk { RANDOM_WALK_PROBE } else { 0 };
 		update_data_with_result(flags, live_model_probability, success);
 		Some(()) // We don't use the return value, but want to use `?` above.
 	};
@@ -145,8 +150,8 @@ pub fn results_complete(state: State) {
 	// We break out log-loss for failure and success hops and print averages between the two
 	// (rather than in aggregate) as there are substantially more succeeding hops than there are
 	// failing hops.
-	for category in 0..CATEGORIES / 4 {
-		let flags = category * 4;
+	for category in 0..2 {
+		let flags = category * LIVE;
 		let mut category_name = String::new();
 		if (flags & LIVE) != 0 {
 			category_name += "Live Bounds Model";
@@ -156,21 +161,31 @@ pub fn results_complete(state: State) {
 		for no_data in 0..2 {
 			let flags = flags + no_data * NO_DATA;
 			let fail_res = state.log_loss_sum[flags] / state.result_count[flags] as f64;
-			let suc_res = state.log_loss_sum[flags|1] / state.result_count[flags|1] as f64;
+			let suc_res = state.log_loss_sum[flags|SUCCESS] / state.result_count[flags|SUCCESS] as f64;
+			let rand_fail_res = state.log_loss_sum[flags|RANDOM_WALK_PROBE]
+				/ state.result_count[flags|RANDOM_WALK_PROBE] as f64;
+			let rand_suc_res = state.log_loss_sum[flags|SUCCESS|RANDOM_WALK_PROBE]
+				/ state.result_count[flags|SUCCESS|RANDOM_WALK_PROBE] as f64;
 			let mut category_name = category_name.clone();
 			if (flags & NO_DATA) != 0 {
 				category_name += " (w/ insufficient data)";
 			} else {
 				category_name += " (w/ some channel hist)";
 			}
-			println!("Avg {} success log-loss: {}", category_name, suc_res);
-			println!("Avg {} failure log-loss: {}", category_name, fail_res);
-			println!("Avg {} average log-loss: {}", category_name, (suc_res + fail_res) / 2.0);
+			println!("Avg {} LDK-selected success log-loss: {}", category_name, suc_res);
+			println!("Avg {} LDK-selected failure log-loss: {}", category_name, fail_res);
+			println!("Avg {} random-walk success log-loss: {}", category_name, rand_suc_res);
+			println!("Avg {} random-walk failure log-loss: {}", category_name, rand_fail_res);
+			println!("Avg {} all-probes average log-loss: {}", category_name, (suc_res + fail_res) / 2.0);
 		}
-		let fail_res = (state.log_loss_sum[flags] + state.log_loss_sum[flags + NO_DATA])
-			/ (state.result_count[flags] + state.result_count[flags + NO_DATA]) as f64;
-		let suc_res = (state.log_loss_sum[flags + 1] + state.log_loss_sum[flags + NO_DATA + 1])
-			/ (state.result_count[flags + 1] + state.result_count[flags + NO_DATA + 1]) as f64;
+		let fail_res = (state.log_loss_sum[flags] + state.log_loss_sum[flags + NO_DATA]
+				+ state.log_loss_sum[flags|RANDOM_WALK_PROBE] + state.log_loss_sum[flags|NO_DATA|RANDOM_WALK_PROBE])
+			/ (state.result_count[flags] + state.result_count[flags|NO_DATA]
+				+ state.result_count[flags|RANDOM_WALK_PROBE] + state.result_count[flags|NO_DATA|RANDOM_WALK_PROBE]) as f64;
+		let suc_res = (state.log_loss_sum[flags|SUCCESS] + state.log_loss_sum[flags|NO_DATA|SUCCESS]
+				+ state.log_loss_sum[flags|RANDOM_WALK_PROBE|SUCCESS] + state.log_loss_sum[flags|NO_DATA|RANDOM_WALK_PROBE|SUCCESS])
+			/ (state.result_count[flags|SUCCESS] + state.result_count[flags|NO_DATA|SUCCESS]
+				+ state.result_count[flags|RANDOM_WALK_PROBE|SUCCESS] + state.result_count[flags|NO_DATA|RANDOM_WALK_PROBE|SUCCESS]) as f64;
 		println!("Avg {} success log-loss: {}", category_name, suc_res);
 		println!("Avg {} failure log-loss: {}", category_name, fail_res);
 		println!("Avg {} average log-loss: {}", category_name, (suc_res + fail_res) / 2.0);
